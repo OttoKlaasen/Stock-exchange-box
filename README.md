@@ -8,3 +8,29 @@ The unit contains a green and red LED which indicates the average price last hou
 In the published code we have changed the SSID and API keys which you need to replace by your own code.
 
 The code needs to be inserted in Platform IO.
+
+The Platform IO config file looks like this:
+
+; PlatformIO Project Configuration File
+;
+;   Build options: build flags, source filter
+;   Upload options: custom upload port, speed and extra flags
+;   Library options: dependencies, extra library storages
+;   Advanced options: extra scripting
+;
+; Please visit documentation for the other options and examples
+; https://docs.platformio.org/page/projectconf.html
+
+[env:nodemcuv2]
+platform = espressif8266
+board = nodemcuv2
+framework = arduino
+
+monitor_speed = 115200
+
+# using GIT Url (the latest development version)
+lib_deps = https://github.com/arduino-libraries/NTPClient.git
+
+
+
+
