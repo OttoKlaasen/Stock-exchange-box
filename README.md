@@ -34,7 +34,7 @@ framework = arduino
 
 monitor_speed = 115200
 
-# using GIT Url (the latest development version)
+; # using GIT Url (the latest development version)
 lib_deps = https://github.com/arduino-libraries/NTPClient.git
 
 
