@@ -1,0 +1,602 @@
+#include <Arduino.h>
+
+// This program shows to function to connect to alpah vantage for stock price.
+// For method ContactAlphavantage() a fingerprint from the site is required, problem it will expire every two months.
+// Method NonSecureContactAlphavantage() does not required a fingerprint but is unsecure.
+
+// Load Wi-Fi library
+#include <ESP8266WiFi.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <ESP8266HTTPClient.h>    // Note this library does not support https#include <ESP8266WiFi.h>
+#include <WiFiClientSecureBearSSL.h>
+
+// https://www.alphavantage.co/support/#api-key
+// My API key: JR1RWSSAECHSHYXX for online.nl
+// My API key: OG1NJ8JTK9FPZRXX for Philips.com
+const String AlphaAPI = "JR1RWSSAECHSHYXX";
+// Valid until 09‎ ‎November‎ ‎2019 ‎00‎:‎58‎:‎26
+const String AlphaSHA1 = "DC:EF:D1:E6:BE:2D:AC:EC:4E:EC:DA:04:A1:49:93:B5:35:24:EC:XX";
+// const String AlphaSHA1 = "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00";    // Does not work
+
+// My API key for iexCloud: pk_682e4762a9674af4aadd11ceecd15eXX
+// My SHA1 fingerprint for iex: F5:71:04:D9:0C:F6:77:A5:E3:26:10:27:25:A3:F7:B2:6A:27:7D:XX
+const String iexAPI = "pk_682e4762a9674af4aadd11ceecd15eXX";
+const String iexSHA1 = "F5:71:04:D9:0C:F6:77:A5:E3:26:10:27:25:A3:F7:B2:6A:27:7D:XX";
+// iax is not used in this code, but can be used, it shows only dollar price so you need to convert to euro or
+// any other currency. This code does not show how to do that.
+
+// Replace with your network credentials
+const char* ssid     = "HG655D-XX";
+const char* password = "XXXXX";
+// Alternative ssid office. make sure not to publish this in public domein.
+const char* ssid_p     = "XXXX";
+const char* password_p = "XXXX";
+// Alternative ssid office. make sure not to publish this in public domein/Site has no password
+const char* ssid_philips_public     = "XXXX";
+const char* password_philips_public = "";
+// const char* ipport = "443";
+String MyLocalIp;  // A variable to save IP address
+
+// Set web server port number to 80
+WiFiServer server(80);
+
+// Setup for NTP
+
+const long utcOffsetInSeconds = 7200;  // Here you cn change the time offset
+
+char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+
+// Define NTP Client to get time
+WiFiUDP ntpUDP;
+// NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffsetInSeconds);
+NTPClient timeClient(ntpUDP, "3.nl.pool.ntp.org", utcOffsetInSeconds);
+
+//
+// Use one MAX7219 to control 8-digit seven-segment display
+// the display module: http://www.icshop.com.tw/product_info.php/products_id/20686
+//
+// MAX7219 datasheet: https://datasheets.maximintegrated.com/en/ds/MAX7219-MAX7221.pdf
+//
+
+// the MAX7219 address map (datasheet table 2)
+#define MAX7219_DECODE_REG      (0x09)
+#define MAX7219_INTENSITY_REG   (0x0A)
+#define MAX7219_SCANLIMIT_REG   (0x0B)
+#define MAX7219_SHUTDOWN_REG    (0X0C)
+#define MAX7219_DISPLAYTEST_REG (0x0F)
+#define MAX7219_DIGIT_REG(pos)  ((pos) + 1)
+
+// shutdown mode (datasheet table 3)
+#define MAX7219_OFF             (0x0)
+#define MAX7219_ON              (0x1)
+
+// GPIO 4 of MAX7219 (CLK)
+const int clock_pin = D2;
+// GPIO 5 of MAX7219 (LOAD) or CS on module
+const int data_latch_pin = D1;
+// GPIO 12 of MAX7219 (DIN)
+const int data_input_pin = D6;
+// PushButton to change between date and stock price, gpio 10
+const int PushButton = 10;
+// Stock higher
+const int LedRed = D5;
+// Stock lower
+const int LedGreen = D7;
+
+// digit pattern for a 7-segment display. datasheet table 5
+const byte digit_pattern[18] =
+{
+  B01111110,  // 0
+  B00110000,  // 1
+  B01101101,  // 2
+  B01111001,  // 3
+  B00110011,  // 4
+  B01011011,  // 5
+  B01011111,  // 6
+  B01110000,  // 7
+  B01111111,  // 8
+  B01111011,  // 9
+  B01110111,  // A
+  B00011111,  // b
+  B01001110,  // C
+  B00111101,  // d
+  B01001111,  // E
+  B01000111,  // F
+  B00000001,  // -
+  B00000000   // Blank
+};
+
+#define DP_FLAG       (B10000000)
+#define NUM_OF_DIGITS (8)
+#define MaxArray (10)
+
+
+unsigned int counter = 0;    // Loop counter
+unsigned int digit_base = 10;
+int StartOfValue = 0;
+String myString;
+String keyString;
+byte byte_data;
+unsigned int h0,h1,h3,h4,h6,h7;
+bool ShowStock = false;     // Status Parameter which show time or the stock price
+bool val = 1;                   // Value of PushButton
+bool lastval = 1;               // For debounce
+float OldStockPrice = 0;        // Old stock price for LEDS control.
+float StockBuffer[MaxArray];    // Array for moving avarage values
+int Array_Pointer = 0;              // Index for my Array
+int httpCode;
+
+// update the register value of MAX7219
+void set_register(byte address, byte value)  
+{
+  digitalWrite(data_latch_pin, LOW);
+  shiftOut(data_input_pin, clock_pin, MSBFIRST, address);
+  shiftOut(data_input_pin, clock_pin, MSBFIRST, value);
+  digitalWrite(data_latch_pin, HIGH);
+}
+
+void init_max7219()
+{
+  // disable test mode. datasheet table 10
+  set_register(MAX7219_DISPLAYTEST_REG, MAX7219_OFF);
+  // set medium intensity. datasheet table 7
+  set_register(MAX7219_INTENSITY_REG, 0xf);
+  // turn off display. datasheet table 3
+  set_register(MAX7219_SHUTDOWN_REG, MAX7219_OFF);
+  // drive 8 digits. datasheet table 8
+  set_register(MAX7219_SCANLIMIT_REG, 7);
+  // no decode mode for all positions. datasheet table 4
+  set_register(MAX7219_DECODE_REG, B00000000);
+ 
+}
+
+ void DisplayConnect()  // On a 8 segment display a moving "-"
+{   // Written by Otto Klaasen (C) 2019
+          
+         byte_data = digit_pattern[17];    // This will get the byte from the array table and blanks display
+         for (int i = 0 ;i <= 7;i++) {
+              set_register(MAX7219_DIGIT_REG(i), byte_data);  // Clear all segment
+         }
+         set_register(MAX7219_SHUTDOWN_REG, MAX7219_ON);
+         byte_data = digit_pattern[16]; 
+         for (int i = 7 ;i >= 0;i--) {
+              set_register(MAX7219_DIGIT_REG(i), byte_data);
+                // turn on display
+              set_register(MAX7219_SHUTDOWN_REG, MAX7219_ON);
+              delay(200);
+         }        
+}
+
+ void DisplayStockPrice(String Price)  // On a 8 segment display
+{   // Written by Otto Klaasen (C) 2019"
+    // Value has to be like 43.3200, if your value is 43.32 add trailing zero's like value + "00"
+    String SingleDigitChar;
+    int SingleDigit;
+    int j;
+    // We asume the dot is in the middle, so 4 segments after the dot and 4 before.
+   
+    j = Price.length()-1;
+    
+    for (int i = 0;i <= 4;i++) {
+        // Serial.print(j);
+        SingleDigitChar = Price[j];
+        SingleDigit = SingleDigitChar.toInt();
+        byte_data = digit_pattern[SingleDigit];    // This will get the byte from the array table
+        set_register(MAX7219_DIGIT_REG(i), byte_data);
+        j--;
+    }
+    j = Price.length()-6;
+    for (int i = 4 ;i <= 7;i++) {
+        // Serial.print(j);
+        if (j < 0) { // no values available
+          	SingleDigit = 0;
+        }
+        else {
+            SingleDigitChar = Price[j];
+            SingleDigit = SingleDigitChar.toInt();
+        }
+        byte_data = digit_pattern[SingleDigit];    // This will get the byte from the array table
+        if (i==4)
+              {
+                byte_data |= DP_FLAG;
+              }
+        set_register(MAX7219_DIGIT_REG(i), byte_data);
+        j--;
+    }
+
+    // turn on display
+    set_register(MAX7219_SHUTDOWN_REG, MAX7219_ON);
+    delay(100);
+
+} 
+
+void NonSecureContactAlphavantage()
+{
+// This code is base on code you will find here: https://buger.dread.cz/category/esp8266.html
+String StockPrice;
+
+float NewStockPrice;
+float AvgStock = 0;
+
+std::unique_ptr<BearSSL::WiFiClientSecure>client(new BearSSL::WiFiClientSecure);
+  client->setInsecure();
+  HTTPClient https;
+
+  if (https.begin(*client, "https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=phia.ams&apikey=" + AlphaAPI + "&datatype=json/")) {  // HTTPS
+    Serial.println("[HTTPS] GET...");
+    int httpCode = https.GET();
+
+    // httpCode will be negative on error
+    if (httpCode > 0) {
+      // HTTP header has been send and Server response header has been handled
+      Serial.printf("[HTTPS] GET... code: %d\n", httpCode);
+      // file found at server?
+      if (httpCode == HTTP_CODE_OK) {
+        String payload = https.getString();
+        Serial.println(String("[HTTPS] Received payload: ") + payload);
+        // Get the current price of our Philips stock
+                  keyString = "05. price";
+                  Serial.println(payload.indexOf(keyString));
+                  StartOfValue = payload.indexOf(keyString) + keyString.length() + 4;
+                  Serial.println(StartOfValue); 
+                  StockPrice = payload.substring(StartOfValue, StartOfValue+7);
+                  Serial.println(StockPrice);
+
+                  DisplayStockPrice(StockPrice);
+
+                  // Controlling GREEN and REd LEDS
+                  char floatbuf[32]; // make this at least big enough for the whole string
+                  StockPrice.toCharArray(floatbuf, sizeof(floatbuf));  // Copy to floatbuf
+                  NewStockPrice = atof(floatbuf);
+                  // Avarage StockBuffer
+                  StockBuffer[Array_Pointer] = NewStockPrice;  // Array for moving avarage values
+                  Array_Pointer++;
+                  if (Array_Pointer>= MaxArray)  {  // Go to start of buffer array
+                      Array_Pointer = 0;
+                  }
+                  // Calcutale Average adding all none zero values, ignore values of 0
+                  int j = 0;
+                  for (int i = 0;i < MaxArray;i++) {
+                      if (!!!StockBuffer[i] == 0 ) {
+                        AvgStock = AvgStock + StockBuffer[i];   // Count up
+                        j++;
+                      }
+                  }
+
+                  // Calculate avarage
+                  AvgStock = AvgStock/j;
+
+                  Serial.print("NewStockPrice: "); Serial.println(NewStockPrice);
+                  Serial.print("Average stock: "); Serial.println(AvgStock);
+                  Serial.print("Buffer used: "); Serial.println(j);
+                  Serial.print("Array_Pointer "); Serial.println(Array_Pointer);
+                  Serial.println("Dump Average buffer: ");
+
+                  for (int i = 0;i < MaxArray;i++) {
+                        Serial.println(StockBuffer[i]);
+                  }
+
+                  if (NewStockPrice >= AvgStock) {
+                         digitalWrite(LedGreen,HIGH);
+                         digitalWrite(LedRed,LOW);
+                          Serial.println("StockPrice goes higher.");
+                  }
+                  else { 
+                         digitalWrite(LedGreen,LOW);
+                         digitalWrite(LedRed,HIGH);
+                         Serial.println("StockPrice goes lower.");
+                  }
+      }
+    } else {
+      Serial.printf("[HTTPS] GET... failed, error: %s\n\r", https.errorToString(httpCode).c_str());
+    }
+
+    https.end();
+  } else {
+    Serial.printf("[HTTPS] Unable to connect\n\r");
+  }
+}
+
+void ContactAlphavantage()
+{
+String StockPrice;
+
+float NewStockPrice;
+float AvgStock = 0;
+/*
+Call rate at alphavantage:
+"Note": "Thank you for using Alpha Vantage! Our standard API call frequency is 5 calls per minute and 500 calls per day.
+ Please visit https://www.alphavantage.co/premium/ if you would like to target a higher API call frequency."
+ The result of the used API call in this program is going to look like this:
+{
+    "Global Quote": {
+        "01. symbol": "PHIA.AMS",
+        "02. open": "37.6100",
+        "03. high": "37.9250",
+        "04. low": "37.3950",
+        "05. price": "37.7300",
+        "06. volume": "2203860",
+        "07. latest trading day": "2019-06-26",
+        "08. previous close": "37.8800",
+        "09. change": "-0.1500",
+        "10. change percent": "-0.3960%"
+    }
+} */
+
+if (WiFi.status() == WL_CONNECTED) { //Check WiFi connection status
+
+/// HTTP client errors, this section is just for documenting what the httpCode result means in plain text
+/* #define HTTPC_ERROR_CONNECTION_REFUSED (-1)
+#define HTTPC_ERROR_SEND_HEADER_FAILED (-2)
+#define HTTPC_ERROR_SEND_PAYLOAD_FAILED (-3)
+#define HTTPC_ERROR_NOT_CONNECTED (-4)
+#define HTTPC_ERROR_CONNECTION_LOST (-5)
+#define HTTPC_ERROR_NO_STREAM (-6)
+#define HTTPC_ERROR_NO_HTTP_SERVER (-7)
+#define HTTPC_ERROR_TOO_LESS_RAM (-8)
+#define HTTPC_ERROR_ENCODING (-9)
+#define HTTPC_ERROR_STREAM_WRITE (-10)
+#define HTTPC_ERROR_READ_TIMEOUT (-11) */
+
+              HTTPClient http;  //Declare an object of class HTTPClient
+              int b = 0;
+              do {
+                  // Change SHA1 fingerprint if this does not work
+                  http.begin("https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=phia.ams&apikey="+ AlphaAPI +"&datatype=json/",AlphaSHA1);  //Specify request destination
+                  httpCode = http.GET();
+                  Serial.print("httpCode= ");
+                  Serial.println(httpCode);
+                  b++;
+                  if (b > 50) break;   // Quit loop after 50 tries
+             } while (httpCode < 0);
+
+                Serial.print("Got the httpCode= ");
+                Serial.println(httpCode);
+                if (httpCode > 0) { //Check the returning code
+                  String payload = http.getString();   //Get the request response payload
+                  Serial.println(payload);                     //Print the response payload
+                  // Get the current price of our Philips stock
+                  keyString = "05. price";
+                  Serial.println(payload.indexOf(keyString));
+                  StartOfValue = payload.indexOf(keyString) + keyString.length() + 4;
+                  Serial.println(StartOfValue); 
+                  StockPrice = payload.substring(StartOfValue, StartOfValue+7);
+                  Serial.println(StockPrice);
+
+                  DisplayStockPrice(StockPrice);
+
+                  // Controlling GREEN and REd LEDS
+                  char floatbuf[32]; // make this at least big enough for the whole string
+                  StockPrice.toCharArray(floatbuf, sizeof(floatbuf));  // Copy to floatbuf
+                  NewStockPrice = atof(floatbuf);
+                  // Avarage StockBuffer
+                  StockBuffer[Array_Pointer] = NewStockPrice;  // Array for moving avarage values
+                  Array_Pointer++;
+                  if (Array_Pointer>= MaxArray)  {  // Go to start of buffer array
+                      Array_Pointer = 0;
+                  }
+                  // Calcutale Average adding all none zero values, ignore values of 0
+                  int j = 0;
+                  for (int i = 0;i < MaxArray;i++) {
+                      if (!!!StockBuffer[i] == 0 ) {
+                        AvgStock = AvgStock + StockBuffer[i];   // Count up
+                        j++;
+                      }
+                  }
+
+                  // Calculate avarage
+                  AvgStock = AvgStock/j;
+
+                  Serial.print("NewStockPrice: "); Serial.println(NewStockPrice);
+                  Serial.print("Average stock: "); Serial.println(AvgStock);
+                  Serial.print("Buffer used: "); Serial.println(j);
+                  Serial.print("Array_Pointer "); Serial.println(Array_Pointer);
+                  Serial.println("Dump Average buffer: ");
+
+                  for (int i = 0;i < MaxArray;i++) {
+                        Serial.println(StockBuffer[i]);
+                  }
+
+                  if (NewStockPrice >= AvgStock) {
+                         digitalWrite(LedGreen,HIGH);
+                         digitalWrite(LedRed,LOW);
+                          Serial.println("StockPrice goes higher.");
+                  }
+                  else { 
+                         digitalWrite(LedGreen,LOW);
+                         digitalWrite(LedRed,HIGH);
+                         Serial.println("StockPrice goes lower.");
+                  }
+                }
+                http.end();   //Close connection
+          }
+    }
+
+
+void NTPTime() {
+
+  // Get and display NTP time
+
+  timeClient.update();
+
+  Serial.print(daysOfTheWeek[timeClient.getDay()]);
+  Serial.print(", ");
+  Serial.print(timeClient.getHours());
+  Serial.print(":");
+  Serial.print(timeClient.getMinutes());
+  Serial.print(":");
+  Serial.println(timeClient.getSeconds());
+  Serial.println(timeClient.getFormattedTime());
+  
+  byte_data = digit_pattern[16];    // This will get the byte from the array table
+  set_register(MAX7219_DIGIT_REG(5), byte_data);
+  set_register(MAX7219_DIGIT_REG(2), byte_data);
+
+  // Get hours for the display.
+  // Remainder operation calculates the remainder when one integer is divided by another.
+  // So if number is 12 and digit_base is 10, the result will be 2.
+    h6 = timeClient.getHours() % digit_base;
+    byte_data = digit_pattern[h6];    // This will get the byte from the array table
+    set_register(MAX7219_DIGIT_REG(6), byte_data); 
+  // This is a convenient shorthand to perform division of a variable with another constant or variable.
+    h7 = (timeClient.getHours() / digit_base);
+  // So number will be 12/10 = 1
+    byte_data = digit_pattern[h7];    // This will get the byte from the array table
+    set_register(MAX7219_DIGIT_REG(7), byte_data); 
+
+
+    h3 = timeClient.getMinutes() % digit_base;
+    byte_data = digit_pattern[h3];    // This will get the byte from the array table
+    set_register(MAX7219_DIGIT_REG(3), byte_data); 
+    h4 = (timeClient.getMinutes() / digit_base);
+    byte_data = digit_pattern[h4];    // This will get the byte from the array table
+    set_register(MAX7219_DIGIT_REG(4), byte_data); 
+
+    h0 = timeClient.getSeconds() % digit_base;
+    byte_data = digit_pattern[h0];    // This will get the byte from the array table
+    set_register(MAX7219_DIGIT_REG(0), byte_data); 
+    h1 = (timeClient.getSeconds() / digit_base);
+    byte_data = digit_pattern[h1];    // This will get the byte from the array table
+    set_register(MAX7219_DIGIT_REG(1), byte_data); 
+
+  // turn on display
+  set_register(MAX7219_SHUTDOWN_REG, MAX7219_ON);
+
+}
+
+/********************************************************************************************************************/
+
+void setup()  
+{
+  Serial.begin(115200);
+
+ Serial.println(F("\n\r* * * ESP8266  BOOTUP * * *"));
+
+   // init pin states
+  pinMode(clock_pin, OUTPUT);
+  pinMode(data_latch_pin, OUTPUT);    
+  pinMode(data_input_pin, OUTPUT);
+  pinMode(PushButton,INPUT);
+  pinMode(LedGreen, OUTPUT);
+  pinMode(LedRed, OUTPUT);
+
+  digitalWrite(LedGreen,HIGH);
+  digitalWrite(LedRed,HIGH);
+
+  // init MAX2719 states
+  init_max7219();
+
+// The following code select a static or dynamic IP address, select in the if stament 1 for static and 0 for dynamic
+// Connect to Wi-Fi network with SSID and password
+      Serial.print("Connecting to ");
+      Serial.println(ssid);
+      WiFi.begin(ssid, password);
+      int WifiCounter = 0;
+      while (WiFi.status() != WL_CONNECTED) {
+            delay(500);
+            Serial.print(".");
+            DisplayConnect();
+            WifiCounter++;
+            if (WifiCounter >=20) {
+                Serial.print("Failed to connect to ");
+                Serial.println(ssid);
+                Serial.print("Secure Connecting to ");
+                Serial.println(ssid_p);
+                WiFi.begin(ssid_p, password_p);
+                WifiCounter = 0;
+                while (WiFi.status() != WL_CONNECTED) {
+                      delay(500);
+                      Serial.print(".");
+                      DisplayConnect();
+                      WifiCounter++;
+                      if (WifiCounter >=20) {
+                          Serial.print("Failed to connect to ");
+                          Serial.println(ssid_p);
+                          WifiCounter = 0;
+                          Serial.print("Unsecure Connecting to ");
+                          Serial.println(ssid_philips_public);
+                          WiFi.begin(ssid_philips_public, password_philips_public);
+                          WifiCounter = 0;
+                          while (WiFi.status() != WL_CONNECTED) {
+                                delay(500);
+                                Serial.print(".");
+                                DisplayConnect();
+                                WifiCounter++;
+                                if (WifiCounter >=20) {
+                                    Serial.print("Failed to connect to ");
+                                    Serial.println(ssid_philips_public);
+                                    WifiCounter = 0;
+                                    Serial.print("Connecting to ");
+                                    Serial.println(ssid);
+                                    WiFi.begin(ssid, password);
+                                    break;
+                                }
+                          }
+                   break;
+                  }
+            }
+         }
+      }
+      // Print local IP address and start web server
+      Serial.println("");
+      Serial.println("WiFi connected.");
+      Serial.print("DHCP IP address: ");
+      Serial.println(WiFi.localIP());
+
+      if (0) {    // Select 1 for static IP, select 0 for dynamic IP, this is needed for the Philips WLAN-PUB
+                  // config static IP, in this program the IP address is set in two places.
+          IPAddress ip(192, 168, 1, 101); // where xx is the desired IP Address
+          IPAddress gateway(192, 168, 1, 1); // set gateway to match your network
+          Serial.print(F("Setting IP Address to static ip: "));
+          IPAddress subnet(255, 255, 255, 0); // set subnet mask to match your network
+          Serial.println(ip);
+          WiFi.config(ip, gateway, subnet);
+          MyLocalIp = WiFi.localIP().toString();  // Set the current IP adress to a local variable of type String
+          Serial.print("Local Ip set to IP address: ");
+          Serial.println(MyLocalIp);
+      }
+
+      server.begin();
+      timeClient.begin();
+
+  // Clean Array
+
+for (Array_Pointer = 0 ;Array_Pointer <= MaxArray;Array_Pointer++) {
+     StockBuffer[Array_Pointer] = 0;  // Array for moving avarage values
+}
+Array_Pointer = 0;
+
+// Set LEDS to OFF
+      digitalWrite(LedGreen,LOW);
+      digitalWrite(LedRed,LOW);
+}
+
+void loop()
+{
+ 
+  counter++ ;
+  Serial.println(counter);
+    
+  // Read the PushButton and swap the mode
+  val = digitalRead(PushButton);
+  Serial.print("Button presses ? 1 = not pressed, 0 is presses, value: ");
+  Serial.println(val);
+  if (val == 1) {   // Button not pressed, so display time
+           NTPTime();
+           lastval = 1;
+  }
+  else {  // Button pressed, run the function one time imediatly and after that once every x loops
+          if (val != lastval)  {  // If a change in buton status is detected execute once
+              // ContactAlphavantage();
+              NonSecureContactAlphavantage();
+              lastval = val;
+          }
+          if (counter >= 5000) {   // Update after 5000 loops
+              counter = 0;
+              // ContactAlphavantage();
+              NonSecureContactAlphavantage();
+          }
+  }
+  delay(100);  // Do not change else to many request to Alphavantage.
+}
