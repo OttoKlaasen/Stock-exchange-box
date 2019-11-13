@@ -1,6 +1,6 @@
 #include <Arduino.h>
 
-// This program shows to function to connect to alpah vantage for stock price.
+// This program shows the function to connect to alpah vantage for stock price.
 // For method ContactAlphavantage() a fingerprint from the site is required, problem it will expire every two months.
 // Method NonSecureContactAlphavantage() does not required a fingerprint but is unsecure.
 
@@ -43,7 +43,7 @@ WiFiServer server(80);
 
 // Setup for NTP
 
-const long utcOffsetInSeconds = 7200;  // Here you cn change the time offset
+const long utcOffsetInSeconds = 7200;  // Here you can change the time offset
 
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
